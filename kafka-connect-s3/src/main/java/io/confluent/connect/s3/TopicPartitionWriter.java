@@ -23,6 +23,7 @@ import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.errors.IllegalWorkerStateException;
 import org.apache.kafka.connect.errors.RetriableException;
 import org.apache.kafka.connect.errors.SchemaProjectorException;
+import org.apache.kafka.connect.sink.ErrantRecordReporter;
 import org.apache.kafka.connect.sink.SinkRecord;
 import org.apache.kafka.connect.sink.SinkTaskContext;
 import org.joda.time.DateTime;
@@ -52,6 +53,7 @@ import io.confluent.connect.storage.schema.StorageSchemaCompatibility;
 import io.confluent.connect.storage.util.DateTimeUtils;
 
 public class TopicPartitionWriter {
+
   private static final Logger log = LoggerFactory.getLogger(TopicPartitionWriter.class);
 
   private final Map<String, String> commitFiles;
@@ -91,6 +93,7 @@ public class TopicPartitionWriter {
   private final Time time;
   private DateTimeZone timeZone;
   private final S3SinkConnectorConfig connectorConfig;
+  private ErrantRecordReporter reporter;
   private static final Time SYSTEM_TIME = new SystemTime();
 
   public TopicPartitionWriter(TopicPartition tp,
@@ -141,6 +144,15 @@ public class TopicPartitionWriter {
     timeoutMs = connectorConfig.getLong(S3SinkConnectorConfig.RETRY_BACKOFF_CONFIG);
     compatibility = StorageSchemaCompatibility.getCompatibility(
         connectorConfig.getString(StorageSinkConnectorConfig.SCHEMA_COMPATIBILITY_CONFIG));
+
+    try {
+      reporter = context.errantRecordReporter();
+      if (reporter == null) {
+        log.info("Errant record reporter not configured.");
+      }
+    } catch (NoClassDefFoundError e) {
+      log.warn("AK versions prior to 2.6 do not support the errant record reporter");
+    }
 
     buffer = new LinkedList<>();
     commitFiles = new HashMap<>();
@@ -250,43 +262,56 @@ public class TopicPartitionWriter {
       String encodedPartition,
       long now
   ) {
-    if (compatibility.shouldChangeSchema(record, null, currentValueSchema)
-        && recordCount > 0) {
-      // This branch is never true for the first record read by this TopicPartitionWriter
-      log.trace(
-          "Incompatible change of schema detected for record '{}' with encoded partition "
-          + "'{}' and current offset: '{}'",
-          record,
-          encodedPartition,
-          currentOffset
-      );
-      currentSchemas.put(encodedPartition, valueSchema);
-      nextState();
-    } else if (rotateOnTime(encodedPartition, currentTimestamp, now)) {
-      setNextScheduledRotation();
-      nextState();
-    } else {
-      currentEncodedPartition = encodedPartition;
-      SinkRecord projectedRecord = compatibility.project(
-          record,
-          null,
-          currentValueSchema
-      );
-      writeRecord(projectedRecord);
-      buffer.poll();
-      if (rotateOnSize()) {
-        log.info(
-            "Starting commit and rotation for topic partition {} with start offset {}",
-            tp,
-            startOffsets
+    try {
+      if (compatibility.shouldChangeSchema(record, null, currentValueSchema)
+          && recordCount > 0) {
+        // This branch is never true for the first record read by this TopicPartitionWriter
+        log.trace(
+            "Incompatible change of schema detected for record '{}' with encoded partition "
+                + "'{}' and current offset: '{}'",
+            record,
+            encodedPartition,
+            currentOffset
         );
+        currentSchemas.put(encodedPartition, valueSchema);
         nextState();
-        // Fall through and try to rotate immediately
+      } else if (rotateOnTime(encodedPartition, currentTimestamp, now)) {
+        setNextScheduledRotation();
+        nextState();
       } else {
-        return false;
+        currentEncodedPartition = encodedPartition;
+        SinkRecord projectedRecord = compatibility.project(
+            record,
+            null,
+            currentValueSchema
+        );
+        writeRecord(projectedRecord);
+        buffer.poll();
+        if (rotateOnSize()) {
+          log.info(
+              "Starting commit and rotation for topic partition {} with start offset {}",
+              tp,
+              startOffsets
+          );
+          nextState();
+          // Fall through and try to rotate immediately
+        } else {
+          return false;
+        }
+      }
+      return true;
+    } catch (ConnectException e) {
+      if (reporter != null) {
+        reporter.report(record, e);
+
+        // trigger a flush
+        buffer.poll();
+        nextState();
+        return true;
+      } else {
+        throw e;
       }
     }
-    return true;
   }
 
   private void commitOnTimeIfNoData(long now) {
