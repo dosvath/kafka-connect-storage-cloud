@@ -129,12 +129,6 @@
             <scope>test</scope>
         </dependency>
         <dependency>
-            <groupId>io.confluent.testcontainers</groupId>
-            <artifactId>squid-proxy</artifactId>
-            <version>${confluent.connect.testcontainers.version}</version>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
             <groupId>org.testcontainers</groupId>
             <artifactId>testcontainers</artifactId>
             <version>${org.testcontainer.version}</version>
@@ -199,6 +193,18 @@
                 <inherited>true</inherited>
                 <executions>
                     <execution>
+                        <id>default-testCompile</id>
+                        <phase>test-compile</phase>
+                        <configuration>
+                            <testExcludes>
+                                <exclude>io/confluent/connect/s3/integration/S3SinkConnectorNetworkIT.java</exclude>
+                            </testExcludes>
+                        </configuration>
+                        <goals>
+                            <goal>testCompile</goal>
+                        </goals>
+                    </execution>
+                    <execution>
                         <id>test-compile</id>
                         <phase>process-test-sources</phase>
                         <goals>
@@ -207,6 +213,9 @@
                         <configuration>
                             <source>1.8</source>
                             <target>1.8</target>
+                            <testExcludes>
+                                <exclude>io/confluent/connect/s3/integration/S3SinkConnectorNetworkIT.java</exclude>
+                            </testExcludes>
                         </configuration>
                     </execution>
                 </executions>
